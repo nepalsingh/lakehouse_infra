@@ -1,0 +1,128 @@
+name: Terraform Deploy
+
+on:
+  pull_request:
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '**/*.hcl'
+      - '.terraform.lock.hcl'
+      - '**/.terraform.lock.hcl'
+      - '.github/workflows/terraform-deploy.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '**/*.hcl'
+      - '.terraform.lock.hcl'
+      - '**/.terraform.lock.hcl'
+      - '.github/workflows/terraform-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      terraform_directory:
+        description: Terraform directory to deploy
+        required: false
+        default: .
+      apply:
+        description: Apply the generated Terraform plan
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+concurrency:
+  group: terraform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: true
+  TERRAFORM_VERSION: 1.9.8
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_directories: ${{ steps.find_directories.outputs.terraform_directories }}
+      has_terraform: ${{ steps.find_directories.outputs.has_terraform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find Terraform directories
+        id: find_directories
+        env:
+          INPUT_TERRAFORM_DIRECTORY: ${{ inputs.terraform_directory }}
+        run: |
+          python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manual_dir = os.getenv("INPUT_TERRAFORM_DIRECTORY", "").strip()
+          directories = []
+
+          if manual_dir:
+              path = Path(manual_dir)
+              if path.exists() and any(path.glob("*.tf")):
+                  directories = [path.as_posix()]
+          else:
+              discovered = {
+                  (terraform_file.parent.as_posix() or ".")
+                  for terraform_file in Path(".").rglob("*.tf")
+                  if ".terraform" not in terraform_file.parts
+              }
+              directories = sorted(discovered)
+
+          github_output = os.environ["GITHUB_OUTPUT"]
+          with open(github_output, "a", encoding="utf-8") as output:
+              output.write(f"terraform_directories={json.dumps(directories)}\n")
+              output.write(f"has_terraform={'true' if directories else 'false'}\n")
+          PY
+
+      - name: Report missing Terraform configuration
+        if: steps.find_directories.outputs.has_terraform != 'true'
+        run: echo 'No Terraform configuration found; skipping workflow.'
+
+  deploy:
+    name: Terraform (${{ matrix.terraform_directory }})
+    needs: discover
+    if: needs.discover.outputs.has_terraform == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform_directory: ${{ fromJson(needs.discover.outputs.terraform_directories) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.terraform_directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Terraform apply
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply)
+        run: terraform apply -input=false -auto-approve tfplan
