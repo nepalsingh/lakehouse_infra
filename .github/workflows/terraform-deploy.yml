@@ -22,9 +22,8 @@ on:
   workflow_dispatch:
     inputs:
       terraform_directory:
-        description: Terraform directory to deploy
+        description: Optional Terraform directory to deploy; leave blank to discover all Terraform roots
         required: false
-        default: .
       apply:
         description: Apply the generated Terraform plan
         required: false
